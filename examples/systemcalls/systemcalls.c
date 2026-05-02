@@ -17,6 +17,19 @@ bool do_system(const char *cmd)
  *   or false() if it returned a failure
 */
 
+    int proc_ret = system(cmd);
+
+    if (proc_ret >= 0) {
+        if (proc_ret == 0) {
+            printf("Command executed sucessfully!\n");
+        } else {
+            printf("Process exit with code: %d, error: %d\n", proc_ret, errno);
+        }
+        return true;
+    } else {
+        perror("Couldn't fork process!\n");
+        return false;
+    }
     return true;
 }
 
@@ -59,6 +72,27 @@ bool do_exec(int count, ...)
  *
 */
 
+    int process_status = 0;
+    pid_t pid = fork();
+
+    if (pid < 0) {
+        perror("Couldn't fork process!");
+        return false;
+    } else if (pid == 0) {
+        execv(command[0], command);
+        perror("exec operation failed");
+        exit(1);
+        return false;
+    } else {
+        if (wait(&process_status) < 1) {
+            return false;
+        } else {
+            if (WIFEXITED(process_status)) {
+                return (WEXITSTATUS(process_status) == 0);
+            }
+        }
+    }
+    
     va_end(args);
 
     return true;
@@ -93,6 +127,36 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *
 */
 
+    int fd = open(outputfile, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
+        perror("Couldn't open file!");
+        return false;
+    }
+
+    dup2(fd, STDOUT_FILENO);
+    close(fd);
+
+    int process_status = 0;
+    pid_t pid = fork();
+
+    if (pid < 0) {
+        perror("Couldn't fork process!");
+        return false;
+    } else if (pid == 0) {
+        execv(command[0], command);
+        perror("exec operation failed");
+        exit(1);
+        return false;
+    } else {
+        if (wait(&process_status) < 1) {
+            return false;
+        } else {
+            if (WIFEXITED(process_status)) {
+                return (WEXITSTATUS(process_status) == 0);
+            }
+        }
+    }
+    
     va_end(args);
 
     return true;
