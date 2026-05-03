@@ -8,17 +8,16 @@
  * the joiner thread.
  */
 struct thread_data{
-    /*
-     * TODO: add other values your thread will need to manage
-     * into this structure, use this structure to communicate
-     * between the start_thread_obtaining_mutex function and
-     * your thread implementation.
-     */
+    // Added members included code error and previous thread data
 
-    /**
-     * Set to true if the thread completed with success, false
-     * if an error occurred.
-     */
+    struct thread_data *prev_thread;
+    pthread_t *current_thread;
+    pthread_mutex_t *mutex;
+    int wait_to_obtain_ms;
+    int wait_to_release_ms;
+    int error_code;
+
+    // Used to detect runnig threads with non-blocking mechanism
     bool thread_complete_success;
 };
 
@@ -29,7 +28,7 @@ struct thread_data{
 * The start_thread_obtaining_mutex function should only start the thread and should not block
 * for the thread to complete.
 * The start_thread_obtaining_mutex function should use dynamic memory allocation for thread_data
-* structure passed into the thread.  The number of threads active should be limited only by the
+* structure passed into the thread. The number of threads active should be limited only by the
 * amount of available memory.
 * The thread started should return a pointer to the thread_data structure when it exits, which can be used
 * to free memory as well as to check thread_complete_success for successful exit.
@@ -37,4 +36,6 @@ struct thread_data{
 * coresponding to the thread which was started.
 * @return true if the thread could be started, false if a failure occurred.
 */
-bool start_thread_obtaining_mutex(pthread_t *thread, pthread_mutex_t *mutex,int wait_to_obtain_ms, int wait_to_release_ms);
+bool start_thread_obtaining_mutex(pthread_t *thread, pthread_mutex_t *mutex, int wait_to_obtain_ms, int wait_to_release_ms);
+
+struct thread_data* init_thread_data(pthread_t *thread, pthread_mutex_t *mutex,int wait_to_obtain_ms, int wait_to_release_ms);
