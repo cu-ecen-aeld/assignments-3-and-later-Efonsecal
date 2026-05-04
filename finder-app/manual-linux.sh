@@ -21,6 +21,8 @@ else
 	echo "Using passed directory ${OUTDIR} for output"
 fi
 
+#Compile new writer application
+make CROSS_COMPILE=${CROSS_COMPILE}
 FSDIR=${OUTDIR}/rootfs
 
 mkdir -p ${OUTDIR}
@@ -99,6 +101,7 @@ done
 # on the target rootfs
 cp ${FINDER_APP_DIR}/{autorun-qemu.sh,finder.sh,finder-test.sh,writer} ${FSDIR}/home/
 cp ${FINDER_APP_DIR}/conf/{username.txt,assignment.txt} ${FSDIR}/home/conf
+cd 
 
 # Make device nodes
 sudo mknod -m 666 dev/null c 1 3
