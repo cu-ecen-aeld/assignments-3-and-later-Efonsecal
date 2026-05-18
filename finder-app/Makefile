@@ -1,17 +1,11 @@
-SRC := writer.c
-TARGET := writer
-OBJS := writer.o
 CC := $(CROSS_COMPILE)gcc
 
-all: $(TARGET)
+all: writer
 
-$(TARGET): $(OBJS)
-	$(CC) $(OBJS) -o $(TARGET)
-
-%.o: %.c
-	$(CC) -c $
+writer: writer.c
+	$(CC) writer.c -o writer
 
 clean:
-	-rm -f *.o $(TARGET) *.elf *.map
+	-rm -f writer *.o
 
 .PHONY: all clean
