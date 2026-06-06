@@ -85,33 +85,12 @@ int main (int argc, char ** argv) {
     // Step 4: Wait for connection or termination
     
     // Reserve memory for client address
-    int client_fd = -1;
     struct sockaddr client_address;
     char client_ip[16];
     unsigned char ip_d[4];
     memset(client_ip, 0x00, 16);
     socklen_t client_address_l = sizeof(struct sockaddr);
-
-    // Reserve memory for incomming data
-    char *data_buffer = malloc(current_buffer_size);
-    if (data_buffer == NULL) {
-        freeaddrinfo(socket_addr_info);
-        close(socket_fd);
-        log_message(LOG_ERR, "Couldn't allocate databuffer: %d (%s)", errno, strerror(errno));
-        exit(1);
-    }
-    memset(data_buffer, 0x00, current_buffer_size);
-
-    // Track received bytes
-    size_t packet_bytes = 0;
-    ssize_t bytes_received = 0;
-
-    // Packet and connection trackers
-    bool packet_received = false;
-    bool connection_terminated = false;
-
-    // Track bytes to send
-    int read_size = 0;
+    int client_fd = -1;
 
     // Connect and wait for data
     while (!signal_received) {
@@ -126,82 +105,27 @@ int main (int argc, char ** argv) {
             memcpy(ip_d, client_address.sa_data + 2, 4);
             snprintf(client_ip, 16, "%d.%d.%d.%d", ip_d[0], ip_d[1], ip_d[2], ip_d[3]);
             log_message(LOG_INFO, "Accepted connection from %s\n", client_ip);
+            memset(client_ip, 0x00, 16);
         }
 
-        connection_terminated = false;
-        while (!connection_terminated) {
-            packet_received = false;
-            do {
-                // Receive data
-                bytes_received = recv(client_fd, data_buffer + packet_bytes, current_buffer_size - packet_bytes, 0);
-                packet_bytes += bytes_received;
+        struct client_data *client = malloc(sizeof(struct client_data));
 
-                // Check if buffer is full, if so, increment space
-                if (packet_bytes == current_buffer_size) {
-                    current_buffer_size *= 2;
-                    char *fallback_buffer = realloc(data_buffer, current_buffer_size);
-                    if (fallback_buffer == NULL) {
-                        free(data_buffer);
-                        log_message(LOG_WARNING, "Couldn't increase buffer size: %s", strerror(errno));
-                        break;
-                    }
-                    data_buffer = fallback_buffer;
-                } else if (bytes_received <= 0) {
-                    break;
-                } else if (data_buffer[packet_bytes - 1] == '\n') {
-                    packet_received = true;
-                }
-            } while (!packet_received);
-
-            if (bytes_received < 0) {
-                if (signal_received) break;
-                log_message(LOG_ERR, "Unsuccessful data receieving operation: %d (%s)", errno, strerror(errno));
-                break;
-            } else if (bytes_received == 0) {
-                connection_terminated = true;
-            } else if (data_buffer != NULL && packet_bytes > 0) {
-
-                if (append_to_file(data_buffer) != 0) {
-                    log_message(LOG_ERR, "Error appending to file: %d (%s)", errno, strerror(errno));
-                    exit(1);
-                }
-
-                memset(data_buffer, 0x00, current_buffer_size);
-                if (read_from_file(data_buffer, &read_size) != 0) {
-                    log_message(LOG_ERR, "Error reading from file: %d (%s)", errno, strerror(errno));
-                    exit(1);
-                }
-
-                if (send(client_fd, data_buffer, read_size, 0) < 0) {
-                    if (signal_received) break;
-                    log_message(LOG_ERR, "Unsuccessful data sending operation: %d (%s)", errno, strerror(errno));
-                    break;
-                }
-                shutdown(client_fd, SHUT_RDWR);
-                connection_terminated = true;
-            }
+        if (client == NULL) {
+            log_message(LOG_ERR, "Couldn't allocate client data: %d (%s)", errno, strerror(errno));
+            exit(1);
         }
 
-        log_message(LOG_INFO, "Client disconnected.");
-        packet_bytes = 0;
-        memset(data_buffer, 0x00, current_buffer_size);
+        client->client_fd = client_fd;
+        client->socket_addr_info = socket_addr_info;
+        client->socket_fd = socket_fd;
 
-        if (client_fd != -1) {
-            close(client_fd);
-            client_fd = -1;
-        }
+        process_client_data(client);
     }
 
-    free(data_buffer);
     log_message(LOG_INFO, "Starting cleanup!");
     freeaddrinfo(socket_addr_info);
     shutdown(socket_fd, SHUT_RDWR);
     close(socket_fd);
-    if (client_fd != -1) {
-        close(client_fd);
-        client_fd = -1;
-    }
-    remove(OUTPUT_FILE);
     log_message(LOG_INFO, "Finished execution.");
     return 0;
 }
@@ -250,6 +174,101 @@ void daemonize() {
     dup2(dev_null, STDERR_FILENO);
     close(dev_null);
     daemoned = true;
+}
+
+void process_client_data(struct client_data *client) {
+    // Track received bytes
+    size_t packet_bytes = 0;
+    ssize_t bytes_received = 0;
+
+    // Packet and connection trackers
+    bool packet_received = false;
+    bool connection_terminated = false;
+
+    // Track bytes to send
+    int read_size = 0;
+
+    // Reserve memory for incomming data
+    char *data_buffer = malloc(current_buffer_size);
+    if (data_buffer == NULL) {
+        freeaddrinfo(client->socket_addr_info);
+        close(client->socket_fd);
+        log_message(LOG_ERR, "Couldn't allocate databuffer: %d (%s)", errno, strerror(errno));
+        exit(1);
+    }
+    memset(data_buffer, 0x00, current_buffer_size);
+
+    connection_terminated = false;
+    while (!connection_terminated) {
+        memset(data_buffer, 0x00, current_buffer_size);
+        packet_bytes = 0;
+        packet_received = false;
+        do {
+            // Receive data
+            bytes_received = recv(client->client_fd, data_buffer + packet_bytes, current_buffer_size - packet_bytes, 0);
+            packet_bytes += bytes_received;
+
+            // Check if buffer is full, if so, increment space
+            if (packet_bytes == current_buffer_size) {
+                current_buffer_size *= 2;
+                char *fallback_buffer = realloc(data_buffer, current_buffer_size);
+                if (fallback_buffer == NULL) {
+                    free(data_buffer);
+                    log_message(LOG_WARNING, "Couldn't increase buffer size: %s", strerror(errno));
+                    break;
+                }
+                data_buffer = fallback_buffer;
+            } else if (bytes_received <= 0) {
+                break;
+            } else if (data_buffer[packet_bytes - 1] == '\n') {
+                packet_received = true;
+            }
+        } while (!packet_received);
+
+        if (bytes_received < 0) {
+            if (signal_received) break;
+            log_message(LOG_ERR, "Unsuccessful data receieving operation: %d (%s)", errno, strerror(errno));
+            break;
+        } else if (bytes_received == 0) {
+            connection_terminated = true;
+        } else if (data_buffer != NULL && packet_bytes > 0) {
+
+            if (append_to_file(data_buffer) != 0) {
+                log_message(LOG_ERR, "Error appending to file: %d (%s)", errno, strerror(errno));
+                exit(1);
+            }
+
+            memset(data_buffer, 0x00, current_buffer_size);
+            if (read_from_file(data_buffer, &read_size) != 0) {
+                log_message(LOG_ERR, "Error reading from file: %d (%s)", errno, strerror(errno));
+                exit(1);
+            }
+
+            if (send(client->client_fd, data_buffer, read_size, 0) < 0) {
+                if (signal_received) break;
+                log_message(LOG_ERR, "Unsuccessful data sending operation: %d (%s)", errno, strerror(errno));
+                break;
+            }
+        }
+    }
+
+    shutdown(client->client_fd, SHUT_RDWR);
+    connection_terminated = true;
+    log_message(LOG_INFO, "Client disconnected.");
+    packet_bytes = 0;
+    memset(data_buffer, 0x00, current_buffer_size);
+
+    if (client->client_fd != -1) {
+        close(client->client_fd);
+        client->client_fd = -1;
+    }
+
+    free(data_buffer);
+
+    if (client->client_fd != -1) {
+        close(client->client_fd);
+        client->client_fd = -1;
+    }
 }
 
 int append_to_file(char *data) {
