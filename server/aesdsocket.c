@@ -1,11 +1,11 @@
 #include "aesdsocket.h"
+#include <time.h>
 
 #define SOCKET_PORT "9000"
 #define INIT_BUFF_SIZE 1024
 #define OUTPUT_FILE "/var/tmp/aesdsocketdata"
 
 volatile bool signal_received = false;
-int current_buffer_size = INIT_BUFF_SIZE;
 
 int main (int argc, char ** argv) {
     
@@ -68,6 +68,7 @@ int main (int argc, char ** argv) {
         log_message(LOG_INFO, "Started listening ...");
     }
     remove(OUTPUT_FILE);
+
     // Check for background mode enabling
     if (argc > 1) {
         if (argc > 2) {
@@ -82,6 +83,13 @@ int main (int argc, char ** argv) {
         }
     }
 
+    pthread_t append_timestamp_thread;
+    int rc = pthread_create(&append_timestamp_thread, NULL, append_timestamp, NULL);
+    if (rc != 0) {
+        log_message(LOG_ERR, "Couldn't create thread: %d (%s)", errno, strerror(errno));
+        exit(1);
+    }
+
     // Step 4: Wait for connection or termination
     
     // Reserve memory for client address
@@ -92,10 +100,17 @@ int main (int argc, char ** argv) {
     socklen_t client_address_l = sizeof(struct sockaddr);
     int client_fd = -1;
 
+    // Threads list definition
+    SLIST_HEAD(thread_data_list, thread_data_node);
+    struct thread_data_node *thread_node, *tmp; // Iterators
+    struct thread_data_list head;
+    SLIST_INIT(&head);
+    
     // Connect and wait for data
     while (!signal_received) {
 
         // Accept client connection
+        memset(client_ip, 0x00, 16);
         client_fd = accept(socket_fd, &client_address, &client_address_l);
         if (client_fd < 0) {
             if (signal_received) break;
@@ -104,28 +119,59 @@ int main (int argc, char ** argv) {
         } else {
             memcpy(ip_d, client_address.sa_data + 2, 4);
             snprintf(client_ip, 16, "%d.%d.%d.%d", ip_d[0], ip_d[1], ip_d[2], ip_d[3]);
-            log_message(LOG_INFO, "Accepted connection from %s\n", client_ip);
-            memset(client_ip, 0x00, 16);
+            log_message(LOG_INFO, "Accepted connection from %s", client_ip);
         }
 
-        struct client_data *client = malloc(sizeof(struct client_data));
+        struct thread_data *thread_data = new_client_thread_data(socket_fd, socket_addr_info, client_fd, client_ip);
 
-        if (client == NULL) {
-            log_message(LOG_ERR, "Couldn't allocate client data: %d (%s)", errno, strerror(errno));
+        // Start thread to process client dataappend_timestamp
+        int rc = pthread_create(thread_data->thread, NULL, process_client_data, thread_data);
+        if (rc != 0) {
+            log_message(LOG_ERR, "Couldn't create thread: %d (%s)", errno, strerror(errno));
             exit(1);
         }
 
-        client->client_fd = client_fd;
-        client->socket_addr_info = socket_addr_info;
-        client->socket_fd = socket_fd;
+        // while (thread_data->thread_complete_success == false) {
+        //     if (signal_received) break;
+        // }
 
-        process_client_data(client);
+        // Add thread to list
+        thread_data_node_t *new_thread = malloc(sizeof(thread_data_node_t));
+        new_thread->thread_data = thread_data;
+        SLIST_INSERT_HEAD(&head, new_thread, entries);
+
+        SLIST_FOREACH_SAFE(thread_node, &head, entries, tmp) {
+            struct thread_data *current_thread = thread_node->thread_data;
+            if (current_thread->thread_complete_success == true) {
+                pthread_join(*(current_thread->thread), NULL);
+                SLIST_REMOVE(&head, thread_node, thread_data_node, entries);
+                free(current_thread->client);
+                free(current_thread->thread);
+                free(current_thread->data_buffer);
+                free(current_thread);
+                free(thread_node);
+            }
+        }
+
+    }
+
+    SLIST_FOREACH_SAFE(thread_node, &head, entries, tmp) {
+        struct thread_data *current_thread = thread_node->thread_data;
+        pthread_join(*(current_thread->thread), NULL);
+        SLIST_REMOVE(&head, thread_node, thread_data_node, entries);
+        free(current_thread->client);
+        free(current_thread->thread);
+        free(current_thread->data_buffer);
+        free(current_thread);
+        free(thread_node);
     }
 
     log_message(LOG_INFO, "Starting cleanup!");
+    remove(OUTPUT_FILE);
     freeaddrinfo(socket_addr_info);
     shutdown(socket_fd, SHUT_RDWR);
     close(socket_fd);
+    // pthread_join(append_timestamp_thread, NULL);
     log_message(LOG_INFO, "Finished execution.");
     return 0;
 }
@@ -176,7 +222,46 @@ void daemonize() {
     daemoned = true;
 }
 
-void process_client_data(struct client_data *client) {
+struct thread_data *new_client_thread_data(int socket_fd, struct addrinfo *socket_addr_info, int client_fd, char *ip_address) {
+    // Define client data
+    struct client_data *client = malloc(sizeof(struct client_data));
+
+    if (client == NULL) {
+        log_message(LOG_ERR, "Couldn't allocate client data: %d (%s)", errno, strerror(errno));
+        exit(1);
+    }
+
+    client->client_fd = client_fd;
+    client->socket_addr_info = socket_addr_info;
+    client->socket_fd = socket_fd;
+    client->ip_address = ip_address;
+
+    // Define thread data
+    struct thread_data *thread_data = malloc(sizeof(struct thread_data));
+    if (thread_data == NULL) {
+        log_message(LOG_ERR, "Couldn't allocate thread data: %d (%s)", errno, strerror(errno));
+        exit(1);
+    }
+
+    thread_data->thread_complete_success = false;
+    thread_data->data_buffer = NULL;
+    thread_data->client = client;
+    thread_data->mutex = &data_file_mutex;
+    thread_data->thread = malloc(sizeof(pthread_t));
+    if (thread_data->thread == NULL) {
+        log_message(LOG_ERR, "Couldn't allocate thread: %d (%s)", errno, strerror(errno));
+        exit(1);
+    }
+    
+    return thread_data;
+}
+
+void *process_client_data(void *arg) {
+
+    // Structs
+    struct thread_data *thread_data = (struct thread_data *) arg;
+    struct client_data *client = thread_data->client;
+
     // Track received bytes
     size_t packet_bytes = 0;
     ssize_t bytes_received = 0;
@@ -189,38 +274,44 @@ void process_client_data(struct client_data *client) {
     int read_size = 0;
 
     // Reserve memory for incomming data
-    char *data_buffer = malloc(current_buffer_size);
-    if (data_buffer == NULL) {
+    int current_buffer_size = INIT_BUFF_SIZE;
+    thread_data->data_buffer = malloc(current_buffer_size);
+    if (thread_data->data_buffer == NULL) {
         freeaddrinfo(client->socket_addr_info);
         close(client->socket_fd);
         log_message(LOG_ERR, "Couldn't allocate databuffer: %d (%s)", errno, strerror(errno));
         exit(1);
     }
-    memset(data_buffer, 0x00, current_buffer_size);
+    memset(thread_data->data_buffer, 0x00, current_buffer_size);
+
+    // Mutex return code tracker
+    int mc = 0;
+
+    log_message(LOG_INFO, "Started processing client data ...");
 
     connection_terminated = false;
     while (!connection_terminated) {
-        memset(data_buffer, 0x00, current_buffer_size);
+        memset(thread_data->data_buffer, 0x00, current_buffer_size);
         packet_bytes = 0;
         packet_received = false;
         do {
             // Receive data
-            bytes_received = recv(client->client_fd, data_buffer + packet_bytes, current_buffer_size - packet_bytes, 0);
+            bytes_received = recv(client->client_fd, thread_data->data_buffer + packet_bytes, current_buffer_size - packet_bytes, 0);
             packet_bytes += bytes_received;
 
             // Check if buffer is full, if so, increment space
             if (packet_bytes == current_buffer_size) {
                 current_buffer_size *= 2;
-                char *fallback_buffer = realloc(data_buffer, current_buffer_size);
+                char *fallback_buffer = realloc(thread_data->data_buffer, current_buffer_size);
                 if (fallback_buffer == NULL) {
-                    free(data_buffer);
+                    free(thread_data->data_buffer);
                     log_message(LOG_WARNING, "Couldn't increase buffer size: %s", strerror(errno));
                     break;
                 }
-                data_buffer = fallback_buffer;
+                thread_data->data_buffer = fallback_buffer;
             } else if (bytes_received <= 0) {
                 break;
-            } else if (data_buffer[packet_bytes - 1] == '\n') {
+            } else if (thread_data->data_buffer[packet_bytes - 1] == '\n') {
                 packet_received = true;
             }
         } while (!packet_received);
@@ -231,20 +322,32 @@ void process_client_data(struct client_data *client) {
             break;
         } else if (bytes_received == 0) {
             connection_terminated = true;
-        } else if (data_buffer != NULL && packet_bytes > 0) {
+        } else if (thread_data->data_buffer != NULL && packet_bytes > 0) {
 
-            if (append_to_file(data_buffer) != 0) {
+            // Append data to file and read it back with mutex protection
+            mc = pthread_mutex_lock(thread_data->mutex);
+            if (mc != 0) {
+                log_message(LOG_ERR, "Couldn't lock mutex: %d (%s)", errno, strerror(errno));
+                exit(1);
+            }
+            if (append_to_file(thread_data->data_buffer) != 0) {
                 log_message(LOG_ERR, "Error appending to file: %d (%s)", errno, strerror(errno));
                 exit(1);
             }
 
-            memset(data_buffer, 0x00, current_buffer_size);
-            if (read_from_file(data_buffer, &read_size) != 0) {
+            memset(thread_data->data_buffer, 0x00, current_buffer_size);
+            if (read_from_file(thread_data->data_buffer, &read_size, current_buffer_size) != 0) {
                 log_message(LOG_ERR, "Error reading from file: %d (%s)", errno, strerror(errno));
                 exit(1);
             }
 
-            if (send(client->client_fd, data_buffer, read_size, 0) < 0) {
+            mc = pthread_mutex_unlock(thread_data->mutex);
+            if (mc != 0) {
+                log_message(LOG_ERR, "Couldn't unlock mutex: %d (%s)", errno, strerror(errno));
+                exit(1);
+            }
+
+            if (send(client->client_fd, thread_data->data_buffer, read_size, 0) < 0) {
                 if (signal_received) break;
                 log_message(LOG_ERR, "Unsuccessful data sending operation: %d (%s)", errno, strerror(errno));
                 break;
@@ -254,21 +357,48 @@ void process_client_data(struct client_data *client) {
 
     shutdown(client->client_fd, SHUT_RDWR);
     connection_terminated = true;
-    log_message(LOG_INFO, "Client disconnected.");
+    log_message(LOG_INFO, "Client disconnected from %s", client->ip_address);
     packet_bytes = 0;
-    memset(data_buffer, 0x00, current_buffer_size);
+    memset(thread_data->data_buffer, 0x00, current_buffer_size);
 
     if (client->client_fd != -1) {
         close(client->client_fd);
         client->client_fd = -1;
     }
 
-    free(data_buffer);
+    thread_data->thread_complete_success = true;
+    return NULL;
+}
 
-    if (client->client_fd != -1) {
-        close(client->client_fd);
-        client->client_fd = -1;
+void *append_timestamp() {
+    clockid_t clk_id = CLOCK_REALTIME;
+    struct timespec *ts = malloc(sizeof(struct timespec));
+    char timestamp[100];
+    while (!signal_received) {
+        sleep(10);
+        int current_time = clock_gettime(clk_id, ts);
+        if (current_time != 0) {
+            log_message(LOG_ERR, "Couldn't get time: %d (%s)", errno, strerror(errno));
+            exit(1);
+        }   
+        strftime(timestamp, sizeof(timestamp), "timestamp:%Y-%m-%d %H:%M:%S\n", localtime(&ts->tv_sec));
+        int mc = pthread_mutex_lock(&data_file_mutex);
+        if (mc != 0) {
+            log_message(LOG_ERR, "Couldn't lock mutex: %d (%s)", errno, strerror(errno));
+            exit(1);
+        }
+        if (append_to_file(timestamp) != 0) {
+            log_message(LOG_ERR, "Error appending to file: %d (%s)", errno, strerror(errno));
+            exit(1);
+        }
+        mc = pthread_mutex_unlock(&data_file_mutex);
+        if (mc != 0) {
+            log_message(LOG_ERR, "Couldn't unlock mutex: %d (%s)", errno, strerror(errno));
+            exit(1);
+        }
     }
+    free(ts);
+    return NULL;
 }
 
 int append_to_file(char *data) {
@@ -292,11 +422,11 @@ int append_to_file(char *data) {
     return 0;
 }
 
-int read_from_file(char *send_buffer, int *read_size) {
+int read_from_file(char *send_buffer, int *read_size, int buffer_size) {
     FILE *fd = fopen(OUTPUT_FILE, "r");
 
     if (fd != NULL) {
-        *read_size = fread(send_buffer, 1, current_buffer_size, fd);
+        *read_size = fread(send_buffer, 1, buffer_size, fd);
 
         if (fclose(fd) != 0) {
             return errno;
