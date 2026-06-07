@@ -1,15 +1,16 @@
-CC := $(CROSS_COMPILE)gcc
-CFLAGS := -Wall -Werror -D_GNU_SOURCE=200809L
-LDFLAGS := -lpthread
+CC ?= $(CROSS_COMPILE)gcc
+CFLAGS ?= -Wall -Werror -D_GNU_SOURCE=200809L
+TARGET ?= aesdsocket
+LDFLAGS ?= -lpthread
 
 default: all
 
-all: aesdsocket
+all: $(TARGET)
 
-aesdsocket: aesdsocket.c
-	$(CC) $(CFLAGS) aesdsocket.c -o aesdsocket $(LDFLAGS)
+$(TARGET): $(TARGET).c
+	$(CC) $(CFLAGS) $(TARGET).c -o $(TARGET) $(LDFLAGS)
 
 clean:
-	-rm -f aesdsocket *.o
+	-rm -f $(TARGET) *.o
 
 .PHONY: all clean
